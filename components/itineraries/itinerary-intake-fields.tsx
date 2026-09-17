@@ -40,6 +40,8 @@ type Props = {
   disabled?: boolean;
   /** When provided, renders the "Try Sensei AI (Beta)" card and calls this on click. */
   onSenseiGenerate?: () => void;
+  /** Overrides the default "Generating with Sensei…" label shown while disabled. */
+  senseiStatusLabel?: string;
 };
 
 function CheckboxGroup({
@@ -348,6 +350,7 @@ export function ItineraryIntakeFields({
   onDatesChange,
   disabled,
   onSenseiGenerate,
+  senseiStatusLabel,
 }: Props) {
   const pagodaBuild = buildMode === "pagoda_build";
   const req = pagodaBuild;
@@ -470,7 +473,7 @@ export function ItineraryIntakeFields({
               <span className="w-full">
                 <span className="flex items-center gap-2">
                   <span className="text-sm font-medium text-violet-900">
-                    {disabled ? "Generating with Sensei…" : "Try Sensei AI"}
+                    {disabled ? (senseiStatusLabel || "Generating with Sensei…") : "Try Sensei AI"}
                   </span>
                   <span className="inline-block text-xs font-semibold text-violet-600 bg-violet-100 border border-violet-300 rounded px-1.5 py-0.5 leading-none">
                     Beta

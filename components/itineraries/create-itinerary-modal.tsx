@@ -84,6 +84,7 @@ export function CreateItineraryModal({
   const [buildMode, setBuildMode] = useState<ItineraryBuildMode>("pagoda_build");
   const [intake, setIntake] = useState<ItineraryIntakeData>(emptyIntakeData);
   const [submitting, setSubmitting] = useState(false);
+  const [senseiStatusMsg, setSenseiStatusMsg] = useState("");
   const [profileRequiredOpen, setProfileRequiredOpen] = useState(false);
 
   // Load itinerary data when in edit mode
@@ -385,6 +386,7 @@ export function CreateItineraryModal({
     }
 
     setSubmitting(true);
+    setSenseiStatusMsg("Generating with Sensei…");
     try {
       // Resolve user_id + profile_id server-side (cookies are not accessible client-side)
       const meRes = await fetch("/api/me/profile-id", { cache: "no-store" });
@@ -399,67 +401,143 @@ export function CreateItineraryModal({
       }
 
       const cleaned = intakeDataForApi(intake);
+      const requestBody = {
+        user_id: String(meData.userId),
+        profile_id: String(meData.profileId),
+        name: formData.itineraryName,
+        arrival_date: formData.startDate,
+        departure_date: formData.endDate,
+        ...cleaned,
+      };
 
-      const resp = await fetch("https://pagoda-ai.vercel.app/create-itinerary", {
+      // Step 1: POST to async endpoint — returns { job_id } immediately (202)
+      const asyncRes = await fetch("https://pagoda-ai.vercel.app/create-itinerary-async", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_id: String(meData.userId),
-          profile_id: String(meData.profileId),
-          name: formData.itineraryName,
-          arrival_date: formData.startDate,
-          departure_date: formData.endDate,
-          ...cleaned,
-        }),
+        body: JSON.stringify(requestBody),
       });
-
-      const data = await resp.json().catch(() => null);
-      if (!resp.ok || !data?.itinerary_id) {
+      const asyncData = await asyncRes.json().catch(() => null);
+      if (!asyncRes.ok || !asyncData?.job_id) {
         const errMsg =
-          typeof data?.detail === "string"
-            ? data.detail
-            : Array.isArray(data?.detail)
-            ? (data.detail[0]?.msg ?? "Sensei failed to generate the itinerary.")
-            : (data?.error ?? "Sensei failed to generate the itinerary.");
+          typeof asyncData?.detail === "string"
+            ? asyncData.detail
+            : Array.isArray(asyncData?.detail)
+            ? (asyncData.detail[0]?.msg ?? "Sensei failed to start.")
+            : (asyncData?.error ?? "Sensei failed to start.");
+        throw new Error(errMsg);
+      }
+      const jobId: string = asyncData.job_id;
+
+      // Step 2: Fire the process endpoint and confirm it doesn't immediately reject.
+      // Don't await the body — the processing runs asynchronously on the server.
+      const processRes = await fetch(
+        `https://pagoda-ai.vercel.app/create-itinerary-process/${jobId}`,
+        { method: "POST" }
+      );
+      if (!processRes.ok) {
+        const processData = await processRes.json().catch(() => null);
+        const errMsg =
+          typeof processData?.detail === "string"
+            ? processData.detail
+            : (processData?.error ?? "Sensei failed to start processing.");
         throw new Error(errMsg);
       }
 
-      const jobsCreated: number = data.jobs_created ?? 0;
-      toast.success(
-        `Itinerary generated! ${jobsCreated} tour${jobsCreated === 1 ? "" : "s"} matched.`
-      );
+      // Step 3: Poll GET /create-itinerary-status/{job_id} every 3 s, up to 4 minutes.
+      const POLL_INTERVAL_MS = 3_000;
+      const TIMEOUT_MS = 4 * 60 * 1_000;
+      const ROTATE_EVERY_MS = 15_000;
+      const rotatingMessages = [
+        "Still working — longer itineraries take a bit more time…",
+        "Almost there — Sensei is matching tours for each day…",
+        "Hang tight — finalising your itinerary now…",
+      ];
+      let rotatingIdx = 0;
+      const pollStart = Date.now();
+      let lastRotateAt = pollStart;
 
-      // Reset form and close modal
-      setFormData({ itineraryName: "", country: "Japan", startDate: "", endDate: "" });
-      setBuildMode("pagoda_build");
-      setIntake(emptyIntakeData());
-      onOpenChange(false);
+      while (true) {
+        await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
 
-      // Prepend the new card to the itinerary list
-      if (onItineraryCreated) {
-        const newItinerary: CardItinerary = {
-          id: String(data.itinerary_id),
-          title: formData.itineraryName,
-          location: formData.country,
-          startDate: formData.startDate,
-          endDate: formData.endDate,
-          duration: calculateDuration(formData.startDate, formData.endDate),
-          jobsCount: jobsCreated,
-          unassignedCount: jobsCreated,
-          activities: [],
-          status: "draft",
-        };
-        onItineraryCreated(newItinerary);
+        const elapsed = Date.now() - pollStart;
+
+        // Overall timeout — leave modal open; Sensei may still finish in the background.
+        if (elapsed >= TIMEOUT_MS) {
+          toast(
+            "This is taking longer than expected. You can close this and check back on your itineraries list shortly — Sensei may still finish in the background.",
+            { duration: 10_000 }
+          );
+          return;
+        }
+
+        // Rotate button label every ~15 s so it doesn't look frozen.
+        if (Date.now() - lastRotateAt >= ROTATE_EVERY_MS) {
+          setSenseiStatusMsg(rotatingMessages[rotatingIdx % rotatingMessages.length]);
+          rotatingIdx++;
+          lastRotateAt = Date.now();
+        }
+
+        const statusRes = await fetch(
+          `https://pagoda-ai.vercel.app/create-itinerary-status/${jobId}`,
+          { cache: "no-store" }
+        );
+        if (!statusRes.ok) {
+          // Transient network hiccup — keep polling.
+          continue;
+        }
+        const result = await statusRes.json().catch(() => null);
+        const status: string = result?.status ?? "";
+
+        if (status === "done") {
+          const jobsCreated: number = result.jobs_created ?? 0;
+          toast.success(
+            `Itinerary generated! ${jobsCreated} tour${jobsCreated === 1 ? "" : "s"} matched.`
+          );
+
+          setFormData({ itineraryName: "", country: "Japan", startDate: "", endDate: "" });
+          setBuildMode("pagoda_build");
+          setIntake(emptyIntakeData());
+          onOpenChange(false);
+
+          if (onItineraryCreated) {
+            const newItinerary: CardItinerary = {
+              id: String(result.itinerary_id),
+              title: formData.itineraryName,
+              location: formData.country,
+              startDate: formData.startDate,
+              endDate: formData.endDate,
+              duration: calculateDuration(formData.startDate, formData.endDate),
+              jobsCount: jobsCreated,
+              unassignedCount: jobsCreated,
+              activities: [],
+              status: "draft",
+            };
+            onItineraryCreated(newItinerary);
+          }
+
+          router.push(`/agent/edit-itinerary?itineraryId=${result.itinerary_id}`);
+          return;
+        }
+
+        if (status === "failed") {
+          const errMsg =
+            typeof result?.error === "string"
+              ? result.error
+              : "Sensei failed to generate the itinerary.";
+          toast.error(errMsg);
+          // Keep modal open so the advisor can retry.
+          return;
+        }
+
+        // status === "processing" — continue polling.
       }
-
-      // Navigate directly to the populated itinerary view
-      router.push(`/agent/edit-itinerary?itineraryId=${data.itinerary_id}`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Something went wrong with Sensei.";
       toast.error(msg);
-      // Do NOT close the modal on failure — let the advisor retry
+      // Do NOT close the modal on failure — let the advisor retry.
     } finally {
       setSubmitting(false);
+      setSenseiStatusMsg("");
     }
   };
 
@@ -583,6 +661,7 @@ export function CreateItineraryModal({
             }
             disabled={submitting}
             onSenseiGenerate={!isEditMode ? handleSenseiGenerate : undefined}
+            senseiStatusLabel={senseiStatusMsg || undefined}
           />
 
           {/* Submit Button */}
