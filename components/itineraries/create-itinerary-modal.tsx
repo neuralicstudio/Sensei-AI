@@ -2,7 +2,7 @@
 
 import type React from "react";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -83,6 +83,10 @@ export function CreateItineraryModal({
   });
   const [buildMode, setBuildMode] = useState<ItineraryBuildMode>("pagoda_build");
   const [intake, setIntake] = useState<ItineraryIntakeData>(emptyIntakeData);
+  // Always reflects the latest committed intake so handleSenseiGenerate
+  // can't read stale state from a previous render's closure.
+  const intakeRef = useRef(intake);
+  intakeRef.current = intake;
   const [submitting, setSubmitting] = useState(false);
   const [senseiStatusMsg, setSenseiStatusMsg] = useState("");
   const [profileRequiredOpen, setProfileRequiredOpen] = useState(false);
@@ -362,6 +366,9 @@ export function CreateItineraryModal({
   const handleSenseiGenerate = async () => {
     if (isEditMode) return;
 
+    // Read from ref so a rapid type-then-click can't pick up a stale closure value.
+    const currentIntake = intakeRef.current;
+
     // Same form-field validation as handleSubmit
     if (!formData.itineraryName || !formData.country || !formData.startDate || !formData.endDate) {
       toast.error("Please fill all required fields.");
@@ -379,9 +386,20 @@ export function CreateItineraryModal({
     }
 
     // Sensei requires the same fields as pagoda_build
-    const intakeErr = validateIntakeForPagodaBuild(intake);
+    const intakeErr = validateIntakeForPagodaBuild(currentIntake);
     if (intakeErr) {
       toast.error(intakeErr);
+      return;
+    }
+
+    // Catch rows added via "+ Add city" whose city name was never filled in.
+    // intakeDataForApi silently strips empty-city rows, so without this check the
+    // third city would vanish from the request with no feedback to the user.
+    const hasBlankCity = (currentIntake.destinationStays ?? []).some(
+      (s) => !s.city?.trim()
+    );
+    if (hasBlankCity) {
+      toast.error("Please fill in or remove the empty destination row before continuing.");
       return;
     }
 
@@ -400,7 +418,7 @@ export function CreateItineraryModal({
         throw new Error(meData?.error || "Could not load your profile.");
       }
 
-      const cleaned = intakeDataForApi(intake);
+      const cleaned = intakeDataForApi(currentIntake);
       const requestBody = {
         user_id: String(meData.userId),
         profile_id: String(meData.profileId),
