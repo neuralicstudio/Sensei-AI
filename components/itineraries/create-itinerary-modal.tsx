@@ -87,6 +87,7 @@ export function CreateItineraryModal({
   // can't read stale state from a previous render's closure.
   const intakeRef = useRef(intake);
   intakeRef.current = intake;
+  const senseiIdempotencyKeyRef = useRef<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [senseiStatusMsg, setSenseiStatusMsg] = useState("");
   const [profileRequiredOpen, setProfileRequiredOpen] = useState(false);
@@ -365,6 +366,8 @@ export function CreateItineraryModal({
 
   const handleSenseiGenerate = async () => {
     if (isEditMode) return;
+    setSubmitting(true);
+    senseiIdempotencyKeyRef.current = crypto.randomUUID();
 
     // Read from ref so a rapid type-then-click can't pick up a stale closure value.
     const currentIntake = intakeRef.current;
@@ -372,16 +375,22 @@ export function CreateItineraryModal({
     // Same form-field validation as handleSubmit
     if (!formData.itineraryName || !formData.country || !formData.startDate || !formData.endDate) {
       toast.error("Please fill all required fields.");
+      setSubmitting(false);
+      senseiIdempotencyKeyRef.current = null;
       return;
     }
     const startDate = parseSafariDate(formData.startDate);
     const endDate = parseSafariDate(formData.endDate);
     if (!startDate || !endDate) {
       toast.error("Please enter valid dates.");
+      setSubmitting(false);
+      senseiIdempotencyKeyRef.current = null;
       return;
     }
     if (endDate < startDate) {
       toast.error("Departure date cannot be before Arrival date.");
+      setSubmitting(false);
+      senseiIdempotencyKeyRef.current = null;
       return;
     }
 
@@ -389,6 +398,8 @@ export function CreateItineraryModal({
     const intakeErr = validateIntakeForPagodaBuild(currentIntake);
     if (intakeErr) {
       toast.error(intakeErr);
+      setSubmitting(false);
+      senseiIdempotencyKeyRef.current = null;
       return;
     }
 
@@ -400,10 +411,11 @@ export function CreateItineraryModal({
     );
     if (hasBlankCity) {
       toast.error("Please fill in or remove the empty destination row before continuing.");
+      setSubmitting(false);
+      senseiIdempotencyKeyRef.current = null;
       return;
     }
 
-    setSubmitting(true);
     setSenseiStatusMsg("Generating with Sensei…");
     try {
       // Resolve user_id + profile_id server-side (cookies are not accessible client-side)
@@ -425,6 +437,7 @@ export function CreateItineraryModal({
         name: formData.itineraryName,
         arrival_date: formData.startDate,
         departure_date: formData.endDate,
+        idempotency_key: senseiIdempotencyKeyRef.current,
         ...cleaned,
       };
 
@@ -554,6 +567,7 @@ export function CreateItineraryModal({
       toast.error(msg);
       // Do NOT close the modal on failure — let the advisor retry.
     } finally {
+      senseiIdempotencyKeyRef.current = null;
       setSubmitting(false);
       setSenseiStatusMsg("");
     }
