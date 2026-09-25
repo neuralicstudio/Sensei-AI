@@ -520,7 +520,19 @@ export function CreateItineraryModal({
         const status: string = result?.status ?? "";
 
         if (status === "done") {
-          const jobsCreated: number = result.jobs_created ?? 0;
+          // The status endpoint nests the payload under `result`:
+          //   { status: "done", result: { itinerary_id, jobs_created, … } }
+          const inner = result.result;
+          if (!inner?.itinerary_id) {
+            toast.error(
+              "Itinerary was generated but the response is missing its ID. " +
+              "Please check your itineraries list — it may already be there."
+            );
+            return;
+          }
+
+          const itineraryId: string = inner.itinerary_id;
+          const jobsCreated: number = inner.jobs_created ?? 0;
           toast.success(
             `Itinerary generated! ${jobsCreated} tour${jobsCreated === 1 ? "" : "s"} matched.`
           );
@@ -532,7 +544,7 @@ export function CreateItineraryModal({
 
           if (onItineraryCreated) {
             const newItinerary: CardItinerary = {
-              id: String(result.itinerary_id),
+              id: itineraryId,
               title: formData.itineraryName,
               location: formData.country,
               startDate: formData.startDate,
@@ -546,7 +558,7 @@ export function CreateItineraryModal({
             onItineraryCreated(newItinerary);
           }
 
-          router.push(`/agent/edit-itinerary?itineraryId=${result.itinerary_id}`);
+          router.push(`/agent/edit-itinerary?itineraryId=${itineraryId}`);
           return;
         }
 
